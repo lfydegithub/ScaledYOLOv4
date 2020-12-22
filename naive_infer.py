@@ -84,7 +84,7 @@ def detect(save_img=False):
     t0 = time.time()
     img = torch.zeros((1, 3, imgsz, imgsz), device=device)  # init img
     # run once
-    _ = model(img.half() if half else img) if device.type != 'cpu' else None
+    # _ = model(img.half() if half else img) if device.type != 'cpu' else None
     # fourcc = cv2.VideoWriter_fourcc(* 'mp4v')
     # FPS = 10
     # out_video = cv2.VideoWriter('output.avi', fourcc, FPS, (1920, 1020))
@@ -109,7 +109,6 @@ def detect(save_img=False):
             pred = apply_classifier(pred, modelc, img, im0s)
 
         # Process detections
-
         for i, det in enumerate(pred):  # detections per image
             if webcam:  # batch_size >= 1
                 p, s, im0 = path[i], '%g: ' % i, im0s[i].copy()
@@ -152,10 +151,10 @@ def detect(save_img=False):
 
             # Stream results
             if view_img:
-                cv2.imshow(p, im0)
+                # cv2.imshow(p, im0)
                 # out_video.write(im0)
                 cv2.imshow('', im0)
-                if cv2.waitKey(1) == ord('q'):  # q to quit
+                if cv2.waitKey() == ord('q'):  # q to quit
                     raise StopIteration
 
             # Save results (image with detections)

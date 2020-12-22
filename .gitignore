@@ -14,3 +14,4 @@ __pycache__/
 .history
 checkpoints/
 mish-cuda/
+train_logs/
