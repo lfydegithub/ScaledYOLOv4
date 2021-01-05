@@ -1,0 +1,12 @@
+# vscode
+.vscode
+.history
+
+# python built files
+*.pyc
+__pycache__
+
+# work dir
+checkpoints/
+inference/
+runs/
