@@ -6,6 +6,21 @@ import torch.nn as nn
 
 from models.common import Conv, DWConv
 from utils.google_utils import attempt_download
+from mish_cuda import MishCuda as Mish
+
+
+class TransposeBlock(nn.Module):
+    '''use transpose conv replace upsample'''
+
+    def __init__(self, c_in, c_out, k=4, s=2, p=1):
+        super(TransposeBlock, self).__init__()
+        self.trans_conv = nn.ConvTranspose2d(c_in, c_out, kernel_size=k,
+                                             stride=s, padding=p)
+        self.bn = nn.BatchNorm2d(c_out)
+        self.act = Mish()
+
+    def forward(self, x):
+        return self.act(self.bn(self.trans_conv(x)))
 
 
 class CrossConv(nn.Module):
@@ -24,7 +39,8 @@ class CrossConv(nn.Module):
 
 class C3(nn.Module):
     # Cross Convolution CSP
-    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
+    # ch_in, ch_out, number, shortcut, groups, expansion
+    def __init__(self, c1, c2, n=1, shortcut=True, g=1, e=0.5):
         super(C3, self).__init__()
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, 1, 1)
@@ -33,7 +49,8 @@ class C3(nn.Module):
         self.cv4 = Conv(2 * c_, c2, 1, 1)
         self.bn = nn.BatchNorm2d(2 * c_)  # applied to cat(cv2, cv3)
         self.act = nn.LeakyReLU(0.1, inplace=True)
-        self.m = nn.Sequential(*[CrossConv(c_, c_, 3, 1, g, 1.0, shortcut) for _ in range(n)])
+        self.m = nn.Sequential(
+            *[CrossConv(c_, c_, 3, 1, g, 1.0, shortcut) for _ in range(n)])
 
     def forward(self, x):
         y1 = self.cv3(self.m(self.cv1(x)))
@@ -48,7 +65,8 @@ class Sum(nn.Module):
         self.weight = weight  # apply weights boolean
         self.iter = range(n - 1)  # iter object
         if weight:
-            self.w = nn.Parameter(-torch.arange(1., n) / 2, requires_grad=True)  # layer weights
+            self.w = nn.Parameter(-torch.arange(1., n) / 2,
+                                  requires_grad=True)  # layer weights
 
     def forward(self, x):
         y = x[0]  # no weight
@@ -81,7 +99,9 @@ class GhostBottleneck(nn.Module):
         super(GhostBottleneck, self).__init__()
         c_ = c2 // 2
         self.conv = nn.Sequential(GhostConv(c1, c_, 1, 1),  # pw
-                                  DWConv(c_, c_, k, s, act=False) if s == 2 else nn.Identity(),  # dw
+                                  # dw
+                                  DWConv(
+                                      c_, c_, k, s, act=False) if s == 2 else nn.Identity(),
                                   GhostConv(c_, c2, 1, 1, act=False))  # pw-linear
         self.shortcut = nn.Sequential(DWConv(c1, c1, k, s, act=False),
                                       Conv(c1, c2, 1, 1, act=False)) if s == 2 else nn.Identity()
@@ -97,16 +117,19 @@ class MixConv2d(nn.Module):
         groups = len(k)
         if equal_ch:  # equal c_ per group
             i = torch.linspace(0, groups - 1E-6, c2).floor()  # c2 indices
-            c_ = [(i == g).sum() for g in range(groups)]  # intermediate channels
+            c_ = [(i == g).sum()
+                  for g in range(groups)]  # intermediate channels
         else:  # equal weight.numel() per group
             b = [c2] + [0] * groups
             a = np.eye(groups + 1, groups, k=-1)
             a -= np.roll(a, 1, axis=1)
             a *= np.array(k) ** 2
             a[0] = 1
-            c_ = np.linalg.lstsq(a, b, rcond=None)[0].round()  # solve for equal weight indices, ax = b
+            # solve for equal weight indices, ax = b
+            c_ = np.linalg.lstsq(a, b, rcond=None)[0].round()
 
-        self.m = nn.ModuleList([nn.Conv2d(c1, int(c_[g]), k[g], s, k[g] // 2, bias=False) for g in range(groups)])
+        self.m = nn.ModuleList(
+            [nn.Conv2d(c1, int(c_[g]), k[g], s, k[g] // 2, bias=False) for g in range(groups)])
         self.bn = nn.BatchNorm2d(c2)
         self.act = nn.LeakyReLU(0.1, inplace=True)
 
@@ -134,7 +157,12 @@ def attempt_load(weights, map_location=None):
     model = Ensemble()
     for w in weights if isinstance(weights, list) else [weights]:
         attempt_download(w)
-        model.append(torch.load(w, map_location=map_location)['model'].float().fuse().eval())  # load FP32 model
+        tmp_model = torch.load(w, map_location=map_location)
+        try:
+            # load FP32 model
+            model.append(tmp_model['model'].float().fuse().eval())
+        except:
+            model.append(tmp_model.float().fuse().eval())  # load FP32 model
 
     if len(model) == 1:
         return model[-1]  # return model
