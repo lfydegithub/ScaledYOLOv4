@@ -162,7 +162,7 @@ def train(hyp, opt, device, tb_writer=None):
                     opt.local_rank], output_device=(opt.local_rank))
 
     # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
+    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=False,
                                             cache=opt.cache_images, rect=opt.rect, local_rank=rank,
                                             world_size=opt.world_size)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
@@ -178,7 +178,7 @@ def train(hyp, opt, device, tb_writer=None):
                                        cache=opt.cache_images, rect=True, local_rank=-1, world_size=opt.world_size)[0]
 
     # Model parameters
-    hyp['cls'] *= nc / 80.  # scale coco-tuned hyp['cls'] to current dataset
+    # hyp['cls'] *= nc / 80.  # scale coco-tuned hyp['cls'] to current dataset
     model.nc = nc  # attach number of classes to model
     model.hyp = hyp  # attach hyperparameters to model
     model.gr = 1.0  # giou loss ratio (obj_loss = 1.0 or giou)
@@ -423,30 +423,50 @@ def train(hyp, opt, device, tb_writer=None):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='./weights/yolov4-p5.pt', help='initial weights path')
-    parser.add_argument('--cfg', type=str, default='./models/yolov4-p5.yaml', help='model.yaml path')
-    parser.add_argument('--data', type=str, default='./data/coco.yaml', help='data.yaml path')
-    parser.add_argument('--hyp', type=str, default='', help='hyperparameters path, i.e. data/hyp.scratch.yaml')
+    parser.add_argument('--weights', type=str,
+                        default='./weights/yolov4-p5.pt', help='initial weights path')
+    parser.add_argument(
+        '--cfg', type=str, default='./models/yolov4-p5-kpt.yaml', help='model.yaml path')
+    parser.add_argument('--data', type=str,
+                        default='./data/holo.yaml', help='data.yaml path')
+    parser.add_argument('--hyp', type=str, default='./data/hyp.holo.yaml',
+                        help='hyperparameters path, i.e. data/hyp.scratch.yaml')
     parser.add_argument('--epochs', type=int, default=300)
-    parser.add_argument('--batch-size', type=int, default=16, help='total batch size for all GPUs')
-    parser.add_argument('--img-size', nargs='+', type=int, default=[640, 640], help='train,test sizes')
-    parser.add_argument('--rect', action='store_true', help='rectangular training')
+    parser.add_argument('--batch-size', type=int, default=2,
+                        help='total batch size for all GPUs')
+    parser.add_argument('--img-size', nargs='+', type=int,
+                        default=[512, 512], help='train,test sizes')
+    parser.add_argument('--rect', action='store_true',
+                        help='rectangular training')
     parser.add_argument('--resume', nargs='?', const='get_last', default=False,
                         help='resume from given path/last.pt, or most recent run if blank')
-    parser.add_argument('--nosave', action='store_true', help='only save final checkpoint')
-    parser.add_argument('--notest', action='store_true', help='only test final epoch')
-    parser.add_argument('--noautoanchor', action='store_true', help='disable autoanchor check')
-    parser.add_argument('--evolve', action='store_true', help='evolve hyperparameters')
+    parser.add_argument('--nosave', action='store_true',
+                        help='only save final checkpoint')
+    parser.add_argument('--notest', action='store_true',
+                        help='only test final epoch')
+    parser.add_argument('--noautoanchor', action='store_true',
+                        help='disable autoanchor check')
+    parser.add_argument('--evolve', action='store_true',
+                        help='evolve hyperparameters')
     parser.add_argument('--bucket', type=str, default='', help='gsutil bucket')
-    parser.add_argument('--cache-images', action='store_true', help='cache images for faster training')
-    parser.add_argument('--name', default='', help='renames results.txt to results_name.txt if supplied')
-    parser.add_argument('--device', default='', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--multi-scale', action='store_true', help='vary img-size +/- 50%%')
-    parser.add_argument('--single-cls', action='store_true', help='train as single-class dataset')
-    parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
-    parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
-    parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
-    parser.add_argument('--logdir', type=str, default='runs/', help='logging directory')
+    parser.add_argument('--cache-images', action='store_true',
+                        help='cache images for faster training')
+    parser.add_argument(
+        '--name', default='', help='renames results.txt to results_name.txt if supplied')
+    parser.add_argument('--device', default='',
+                        help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
+    parser.add_argument('--multi-scale', action='store_true',
+                        help='vary img-size +/- 50%%')
+    parser.add_argument('--single-cls', action='store_true',
+                        help='train as single-class dataset')
+    parser.add_argument('--adam', action='store_true',
+                        help='use torch.optim.Adam() optimizer')
+    parser.add_argument('--sync-bn', action='store_true',
+                        help='use SyncBatchNorm, only available in DDP mode')
+    parser.add_argument('--local_rank', type=int, default=-1,
+                        help='DDP parameter, do not modify')
+    parser.add_argument('--logdir', type=str,
+                        default='runs/', help='logging directory')
     opt = parser.parse_args()
 
     # Resume

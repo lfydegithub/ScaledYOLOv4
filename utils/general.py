@@ -510,6 +510,7 @@ def build_targets(p, targets, model):
     na, nt = det.na, targets.shape[0]  # number of anchors, targets
     tcls, tbox, indices, anch = [], [], [], []
     gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
+    # shape: [num_anchor, num_gt_whole_batch] eg: [3, 22]
     ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
     targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
 
@@ -519,9 +520,9 @@ def build_targets(p, targets, model):
                         # [1, 1], [1, -1], [-1, 1], [-1, -1],  # jk,jm,lk,lm
                         ], device=targets.device).float() * g  # offsets
 
-    for i in range(det.nl):
-        anchors = det.anchors[i]
-        gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain
+    for i in range(det.nl): # 3 levels
+        anchors = det.anchors[i] # read this level's anchors
+        gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain; [w,h,w,h]
 
         # Match targets to anchors
         t = targets * gain
