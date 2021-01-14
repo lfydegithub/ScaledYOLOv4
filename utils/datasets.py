@@ -343,7 +343,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.stride = stride
 
         # Define labels
-        self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt') for x in
+        # TODO: 更改了这里
+        self.label_cols = self.hyp['label_cols']
+        self.label_files = [x.replace('images', 'kpt_labels').replace(os.path.splitext(x)[-1], '.txt') for x in
                             self.img_files]
 
         # Check cache
@@ -395,7 +397,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         for i, file in enumerate(pbar):
             l = self.labels[i]  # label
             if l.shape[0]:
-                assert l.shape[1] == 5, '> 5 label columns: %s' % file
+                # TODO: 这里需要修改
+                assert l.shape[1] == self.label_cols, '!=%d label columns: %s' % (
+                    self.label_cols, file)
                 assert (l >= 0).all(), 'negative labels: %s' % file
                 assert (l[:, 1:] <= 1).all(
                 ), 'non-normalized or out of bounds coordinate labels: %s' % file
@@ -484,7 +488,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                         l = np.array(
                             [x.split() for x in f.read().splitlines()], dtype=np.float32)  # labels
                 if len(l) == 0:
-                    l = np.zeros((0, 5), dtype=np.float32)
+                    #TODO: 这里需要修改
+                    l = np.zeros((0, self.label_cols), dtype=np.float32)
                 x[img] = [l, shape]
             except Exception as e:
                 x[img] = None
@@ -542,12 +547,12 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 # Normalized xywh to pixel xyxy format
                 #TODO: 添加关键点坐标
                 labels = x.copy()
-                labels[:, 1] = ratio[0] * w * \
-                    (x[:, 1] - x[:, 3] / 2) + pad[0]  # pad width
-                labels[:, 2] = ratio[1] * h * \
-                    (x[:, 2] - x[:, 4] / 2) + pad[1]  # pad height
+                labels[:, 1] = ratio[0] * w * (x[:, 1] - x[:, 3] / 2) + pad[0]
+                labels[:, 2] = ratio[1] * h * (x[:, 2] - x[:, 4] / 2) + pad[1]
                 labels[:, 3] = ratio[0] * w * (x[:, 1] + x[:, 3] / 2) + pad[0]
                 labels[:, 4] = ratio[1] * h * (x[:, 2] + x[:, 4] / 2) + pad[1]
+                labels[:, 5:][:, 0::2] = ratio[0]*w*(x[:, 5:][:, 0::2])+pad[0]
+                labels[:, 5:][:, 1::2] = ratio[1]*h*(x[:, 5:][:, 1::2])+pad[1]
 
         if self.augment:
             # Augment imagespace
@@ -571,8 +576,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         if nL:
             #TODO: 添加关键点
             labels[:, 1:5] = xyxy2xywh(labels[:, 1:5])  # convert xyxy to xywh
-            labels[:, [2, 4]] /= img.shape[0]  # normalized height 0-1
-            labels[:, [1, 3]] /= img.shape[1]  # normalized width 0-1
+            labels[:, 1:][:, 0::2] /= img.shape[1] # normalized width 0-1
+            labels[:, 1:][:, 1::2] /= img.shape[0] # normalized height 0-1
+            # labels[:, [2, 4]] /= img.shape[0]  # normalized height 0-1
+            # labels[:, [1, 3]] /= img.shape[1]  # normalized width 0-1
 
         if self.augment:
             # flip up-down
@@ -587,8 +594,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                 if nL:
                     labels[:, 1] = 1 - labels[:, 1]
 
-        #TODO: 适配个数, 不再是6
-        labels_out = torch.zeros((nL, 6))
+        # TODO: 适配个数, 不再是6
+        labels_out = torch.zeros((nL, self.label_cols+1))
         if nL:
             labels_out[:, 1:] = torch.from_numpy(labels)
 

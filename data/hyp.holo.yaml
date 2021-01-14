@@ -1,10 +1,11 @@
 # optimizer
-lr0: 0.01 # initial learning rate (SGD=1E-2, Adam=1E-3)
+lr0: 0.1 # initial learning rate (SGD=1E-2, Adam=1E-3)
 momentum: 0.937 # SGD momentum/Adam beta1
 weight_decay: 0.0005 # optimizer weight decay 5e-4
 
 # loss
 giou: 0.05 # GIoU loss gain
+kpt_w: 0.5 # GIoU loss gain
 cls: 0.5 # cls loss gain
 cls_pw: 1.0 # cls BCELoss positive_weight
 obj: 1.0 # obj loss gain (scale with pixels)
@@ -27,3 +28,7 @@ perspective: 0.0 # image perspective (+/- fraction), range 0-0.001
 flipud: 0.0 # image flip up-down (probability)
 fliplr: 0.5 # image flip left-right (probability)
 mixup: 0.2 # image mixup (probability)
+
+label_cols: 13 # columns of label, [cls_id,cx,cy,w,h,x1,y1,x2,y2,x3,y3,x4,y4]
+n_kpt: 4 # number of joint keypoints
+

@@ -194,6 +194,7 @@ def xywh2xyxy(x):
 
 
 def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None):
+    #TODO: 此函数进行了修改
     # Rescale coords (xyxy) from img1_shape to img0_shape
     if ratio_pad is None:  # calculate from img0_shape
         gain = min(img1_shape[0] / img0_shape[0], img1_shape[1] / img0_shape[1])  # gain  = old / new
@@ -202,19 +203,21 @@ def scale_coords(img1_shape, coords, img0_shape, ratio_pad=None):
         gain = ratio_pad[0][0]
         pad = ratio_pad[1]
 
-    coords[:, [0, 2]] -= pad[0]  # x padding
-    coords[:, [1, 3]] -= pad[1]  # y padding
-    coords[:, :4] /= gain
+    coords[:, 0::2] -= pad[0]  # x padding
+    coords[:, 1::2] -= pad[1]  # y padding
+    coords[:, :] /= gain
     clip_coords(coords, img0_shape)
     return coords
 
 
 def clip_coords(boxes, img_shape):
     # Clip bounding xyxy bounding boxes to image shape (height, width)
-    boxes[:, 0].clamp_(0, img_shape[1])  # x1
-    boxes[:, 1].clamp_(0, img_shape[0])  # y1
-    boxes[:, 2].clamp_(0, img_shape[1])  # x2
-    boxes[:, 3].clamp_(0, img_shape[0])  # y2
+    boxes[:, 0::2].clamp_(0, img_shape[1])  # x
+    boxes[:, 1::2].clamp_(0, img_shape[0])  # y
+    # boxes[:, 0].clamp_(0, img_shape[1])  # x1
+    # boxes[:, 1].clamp_(0, img_shape[0])  # y1
+    # boxes[:, 2].clamp_(0, img_shape[1])  # x2
+    # boxes[:, 3].clamp_(0, img_shape[0])  # y2
 
 
 def ap_per_class(tp, conf, pred_cls, target_cls):
@@ -441,14 +444,17 @@ class BCEBlurWithLogitsLoss(nn.Module):
 
 
 def compute_loss(p, targets, model):  # predictions, targets, model
+    #TODO: 此函数进行修改
     device = targets.device
-    lcls, lbox, lobj = torch.zeros(1, device=device), torch.zeros(1, device=device), torch.zeros(1, device=device)
-    tcls, tbox, indices, anchors = build_targets(p, targets, model)  # targets
+    lcls, lbox = torch.zeros(1, device=device), torch.zeros(1, device=device)
+    lobj, lkpt = torch.zeros(1, device=device),torch.zeros(1, device=device)
+    tcls, tbox, indices, anchors, tkpt = build_targets(p, targets, model)  # targets
     h = model.hyp  # hyperparameters
 
     # Define criteria
     BCEcls = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['cls_pw']])).to(device)
     BCEobj = nn.BCEWithLogitsLoss(pos_weight=torch.Tensor([h['obj_pw']])).to(device)
+    kpt_loss_fcn = nn.L1Loss()
 
     # Class label smoothing https://arxiv.org/pdf/1902.04103.pdf eqn 3
     cp, cn = smooth_BCE(eps=0.0)
@@ -479,37 +485,46 @@ def compute_loss(p, targets, model):  # predictions, targets, model
             giou = bbox_iou(pbox.T, tbox[i], x1y1x2y2=False, CIoU=True)  # giou(prediction, target)
             lbox += (1.0 - giou).mean()  # giou loss
 
+            # Keypoints Regression
+            pkpt = (ps[:, 4:12].sigmoid() - 0.5) * 4 * anchors[i].repeat((1, 4))
+            lkpt += kpt_loss_fcn(pkpt, tkpt[i])
+
             # Objectness
             tobj[b, a, gj, gi] = (1.0 - model.gr) + model.gr * giou.detach().clamp(0).type(tobj.dtype)  # giou ratio
 
             # Classification
+            # TODO: 修改了class的下标
             if model.nc > 1:  # cls loss (only if multiple classes)
-                t = torch.full_like(ps[:, 5:], cn, device=device)  # targets
+                t = torch.full_like(ps[:, [-2,-1]], cn, device=device)  # targets
                 t[range(n), tcls[i]] = cp
-                lcls += BCEcls(ps[:, 5:], t)  # BCE
+                lcls += BCEcls(ps[:, [-2,-1]], t)  # BCE
+
 
             # Append targets to text file
             # with open('targets.txt', 'a') as file:
             #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
 
-        lobj += BCEobj(pi[..., 4], tobj) * balance[i]  # obj loss
+        lobj += BCEobj(pi[..., -3], tobj) * balance[i]  # obj loss
 
     s = 3 / np  # output count scaling
     lbox *= h['giou'] * s
     lobj *= h['obj'] * s * (1.4 if np >= 4 else 1.)
     lcls *= h['cls'] * s
+    lkpt *= h['kpt_w'] * s
     bs = tobj.shape[0]  # batch size
 
-    loss = lbox + lobj + lcls
-    return loss * bs, torch.cat((lbox, lobj, lcls, loss)).detach()
+    loss = lbox + lobj + lcls + lkpt
+    return loss * bs, torch.cat((lbox, lobj, lcls, lkpt, loss)).detach()
 
 
 def build_targets(p, targets, model):
+    # TODO: 此函数大改
     # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
     det = model.module.model[-1] if is_parallel(model) else model.model[-1]  # Detect() module
-    na, nt = det.na, targets.shape[0]  # number of anchors, targets
-    tcls, tbox, indices, anch = [], [], [], []
-    gain = torch.ones(7, device=targets.device)  # normalized to gridspace gain
+    na, nt, n_cols = det.na, targets.shape[0], targets.shape[1]  # number of anchors, targets, label columns
+    tcls, tbox, indices, anch, tkpt = [], [], [], [], []
+    # 7 --> 15
+    gain = torch.ones(n_cols+1, device=targets.device)  # normalized to gridspace gain
     # shape: [num_anchor, num_gt_whole_batch] eg: [3, 22]
     ai = torch.arange(na, device=targets.device).float().view(na, 1).repeat(1, nt)  # same as .repeat_interleave(nt)
     targets = torch.cat((targets.repeat(na, 1, 1), ai[:, :, None]), 2)  # append anchor indices
@@ -521,8 +536,9 @@ def build_targets(p, targets, model):
                         ], device=targets.device).float() * g  # offsets
 
     for i in range(det.nl): # 3 levels
-        anchors = det.anchors[i] # read this level's anchors
-        gain[2:6] = torch.tensor(p[i].shape)[[3, 2, 3, 2]]  # xyxy gain; [w,h,w,h]
+        anchors = det.anchors[i]  # read this level's anchors
+        # hard code here, 6 = 4keypoints + 1cxcy + 1wh
+        gain[2:-1] = torch.tensor(p[i].shape)[[3, 2]*6]  # xyxy gain; [w,h,w,h]
 
         # Match targets to anchors
         t = targets * gain
@@ -533,8 +549,8 @@ def build_targets(p, targets, model):
             # j = wh_iou(anchors, t[:, 4:6]) > model.hyp['iou_t']  # iou(3,n)=wh_iou(anchors(3,2), gwh(n,2))
             t = t[j]  # filter
 
-            # Offsets
-            gxy = t[:, 2:4]  # grid xy
+            # Offsets, 通过一种奇葩的手段, 从上下左右四个cell中选择最近的2个cell做为补充的正样本cell
+            gxy = t[:, 2:4] # bbox center xy
             gxi = gain[[2, 3]] - gxy  # inverse
             j, k = ((gxy % 1. < g) & (gxy > 1.)).T
             l, m = ((gxi % 1. < g) & (gxi > 1.)).T
@@ -546,20 +562,23 @@ def build_targets(p, targets, model):
             offsets = 0
 
         # Define
-        b, c = t[:, :2].long().T  # image, class
-        gxy = t[:, 2:4]  # grid xy
-        gwh = t[:, 4:6]  # grid wh
-        gij = (gxy - offsets).long()
-        gi, gj = gij.T  # grid xy indices
+        b, c = t[:, :2].long().T  # batch img id, category id
+        gxy = t[:, 2:4]  # bbox center xy
+        gwh = t[:, 4:6]  # bbox wh
+        gkpt = t[:, 6:-1] # keypoints xy 
+        gij = (gxy - offsets).long() # nearest 2 cell indices
+        gi, gj = gij.T  # nearest 2 cell xy indices
+
 
         # Append
-        a = t[:, 6].long()  # anchor indices
-        indices.append((b, a, gj.clamp_(0, gain[3]), gi.clamp_(0, gain[2])))  # image, anchor, grid indices
-        tbox.append(torch.cat((gxy - gij, gwh), 1))  # box
+        a = t[:, -1].long()  # anchor indices
+        indices.append((b, a, gj.clamp_(0, gain[3]), gi.clamp_(0, gain[2])))  # batch img id, anchor id, grid indices
+        tbox.append(torch.cat((gxy - gij, gwh), 1))  # finally bbox target
+        tkpt.append(gkpt-gxy.repeat(1, 4))
         anch.append(anchors[a])  # anchors
         tcls.append(c)  # class
 
-    return tcls, tbox, indices, anch
+    return tcls, tbox, indices, anch, tkpt
 
 
 def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, classes=None, agnostic=False):
@@ -571,8 +590,9 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, 
     if prediction.dtype is torch.float16:
         prediction = prediction.float()  # to FP32
 
-    nc = prediction[0].shape[1] - 5  # number of classes
-    xc = prediction[..., 4] > conf_thres  # candidates
+    #TODO: 修改了此处
+    nc = 2  # number of classes
+    xc = prediction[..., -(nc+1)] > conf_thres  # candidates
 
     # Settings
     min_wh, max_wh = 2, 4096  # (pixels) minimum and maximum box width and height
@@ -593,22 +613,25 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, 
             continue
 
         # Compute conf
-        x[:, 5:] *= x[:, 4:5]  # conf = obj_conf * cls_conf
+        # x[:, -nc:] *= x[:, -(nc+1):-nc]  # conf = obj_conf * cls_conf
 
         # Box (center x, center y, width, height) to (x1, y1, x2, y2)
-        box = xywh2xyxy(x[:, :4])
+        box = xywh2xyxy(x[:,:4])
+        
+        # Keypoint: center_xy + offset, 4 joint point
+        kpt = x[:, :2].repeat((1, 4)) + x[:, 4:-(nc+1)]
 
         # Detections matrix nx6 (xyxy, conf, cls)
         if multi_label:
-            i, j = (x[:, 5:] > conf_thres).nonzero(as_tuple=False).T
-            x = torch.cat((box[i], x[i, j + 5, None], j[:, None].float()), 1)
+            i, j = (x[:, -nc:] > conf_thres).nonzero(as_tuple=False).T
+            x = torch.cat((box[i], kpt[i], x[i, -nc + j, None], j[:, None].float()), 1)
         else:  # best class only
             conf, j = x[:, 5:].max(1, keepdim=True)
             x = torch.cat((box, conf, j.float()), 1)[conf.view(-1) > conf_thres]
 
         # Filter by class
         if classes:
-            x = x[(x[:, 5:6] == torch.tensor(classes, device=x.device)).any(1)]
+            x = x[(x[:, -1:] == torch.tensor(classes, device=x.device)).any(1)]
 
         # Apply finite constraint
         # if not torch.isfinite(x).all():
@@ -623,8 +646,8 @@ def non_max_suppression(prediction, conf_thres=0.1, iou_thres=0.6, merge=False, 
         # x = x[x[:, 4].argsort(descending=True)]
 
         # Batched NMS
-        c = x[:, 5:6] * (0 if agnostic else max_wh)  # classes
-        boxes, scores = x[:, :4] + c, x[:, 4]  # boxes (offset by class), scores
+        c = x[:, -1:] * (0 if agnostic else max_wh)  # classes
+        boxes, scores = x[:, :4] + c, x[:, -2]  # boxes (offset by class), scores
         i = torchvision.ops.boxes.nms(boxes, scores, iou_thres)
         if i.shape[0] > max_det:  # limit detections
             i = i[:max_det]
@@ -1149,6 +1172,26 @@ def plot_one_box(x, img, color=None, label=None, line_thickness=None):
         cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
         cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
 
+def plot_one_kpt(x, img, color=None, label=None, line_thickness=None):
+    # Plots one bounding box on image img
+    tl = line_thickness or round(0.002 * (img.shape[0] + img.shape[1]) / 2) + 1  # line/font thickness
+    color = color or [random.randint(0, 255) for _ in range(3)]
+
+    c1, c2 = (int(x[0]), int(x[1])), (int(x[2]), int(x[3]))
+    cv2.rectangle(img, c1, c2, color, thickness=tl, lineType=cv2.LINE_AA)
+
+    for i in range(4):
+        pt = (int(x[4+2*i]), int(x[4+2*i+1]))
+        cv2.circle(img, pt, 1, (0, 0, 255), thickness=-1)
+
+    if label:
+        tf = max(tl - 1, 1)  # font thickness
+        t_size = cv2.getTextSize(label, 0, fontScale=tl / 3, thickness=tf)[0]
+        c2 = c1[0] + t_size[0], c1[1] - t_size[1] - 3
+        cv2.rectangle(img, c1, c2, color, -1, cv2.LINE_AA)  # filled
+        cv2.putText(img, label, (c1[0], c1[1] - 2), 0, tl / 3, [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
+    cv2.imshow('', img)
+    cv2.waitKey()
 
 def plot_wh_methods():  # from utils.utils import *; plot_wh_methods()
     # Compares the two methods for width-height anchor multiplication
@@ -1222,7 +1265,9 @@ def plot_images(images, targets, paths=None, fname='images.jpg', names=None, max
             image_targets = targets[targets[:, 0] == i]
             boxes = xywh2xyxy(image_targets[:, 2:6]).T
             classes = image_targets[:, 1].astype('int')
-            gt = image_targets.shape[1] == 6  # ground truth if no conf column
+            # TODO: 修改此处, 等于6代表[batch_id, cls_id, cx, cy, w, h]没有confidence, 等于7代表最后一个confidence
+            # 现在[batch_id, cls_id, cx, cy, w, h, x1y1~x4y4]等于14
+            gt = image_targets.shape[1] == 14  # ground truth if no conf column
             conf = None if gt else image_targets[:, 6]  # check for confidence presence (gt vs pred)
 
             boxes[[0, 2]] *= w

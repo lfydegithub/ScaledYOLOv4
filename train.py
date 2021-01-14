@@ -23,7 +23,7 @@ from utils.datasets import create_dataloader
 from utils.general import (
     check_img_size, torch_distributed_zero_first, labels_to_class_weights, plot_labels, check_anchors,
     labels_to_image_weights, compute_loss, plot_images, fitness, strip_optimizer, plot_results,
-    get_latest_run, check_git_status, check_file, increment_dir, print_mutation, plot_evolution)
+    get_latest_run, check_git_status, check_file, increment_dir, print_mutation, plot_evolution, plot_lr_scheduler)
 from utils.google_utils import attempt_download
 from utils.torch_utils import init_seeds, ModelEMA, select_device, intersect_dicts
 
@@ -114,8 +114,10 @@ def train(hyp, opt, device, tb_writer=None):
     # https://pytorch.org/docs/stable/_modules/torch/optim/lr_scheduler.html#OneCycleLR
     def lf(x): return (((1 + math.cos(x * math.pi / epochs)) / 2)
                        ** 1.0) * 0.8 + 0.2  # cosine
-    scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
-    # plot_lr_scheduler(optimizer, scheduler, epochs)
+    # TODO: 修改了scheduler
+    # scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=lf)
+    scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[1000, 2000, 3000, 4000], gamma=0.1)
+    plot_lr_scheduler(optimizer, scheduler, epochs, log_dir)
 
     # Resume
     start_epoch, best_fitness = 0, 0.0
@@ -243,13 +245,13 @@ def train(hyp, opt, device, tb_writer=None):
         # b = int(random.uniform(0.25 * imgsz, 0.75 * imgsz + gs) // gs * gs)
         # dataset.mosaic_border = [b - imgsz, -b]  # height, width borders
 
-        mloss = torch.zeros(4, device=device)  # mean losses
+        mloss = torch.zeros(5, device=device)  # mean losses
         if rank != -1:
             dataloader.sampler.set_epoch(epoch)
         pbar = enumerate(dataloader)
         if rank in [-1, 0]:
-            print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU',
-                                         'obj', 'cls', 'total', 'targets', 'img_size'))
+            print(('\n' + '%10s' * 9) % ('Epoch', 'gpu_mem', 'GIoU',
+                                         'obj', 'cls', 'kpt', 'total', 'targets', 'img_size'))
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
         # batch -------------------------------------------------------------
@@ -312,22 +314,17 @@ def train(hyp, opt, device, tb_writer=None):
 
             # Print
             if rank in [-1, 0]:
-                mloss = (mloss * i + loss_items) / \
-                    (i + 1)  # update mean losses
-                mem = '%.3gG' % (torch.cuda.memory_reserved(
-                ) / 1E9 if torch.cuda.is_available() else 0)  # (GB)
-                s = ('%10s' * 2 + '%10.4g' * 6) % (
-                    '%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
+                mloss = (mloss * i + loss_items) / (i + 1)  # update mean losses
+                mem = '%.3gG' % (torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0)  # (GB)
+                s = ('%10s' * 2 + '%10.4g' * 7) % ('%g/%g' % (epoch, epochs - 1), mem, *mloss, targets.shape[0], imgs.shape[-1])
                 pbar.set_description(s)
 
                 # Plot
                 if ni < 10:
                     f = str(log_dir / ('train_batch%g.jpg' % ni))  # filename
-                    result = plot_images(
-                        images=imgs, targets=targets, paths=paths, fname=f)
+                    result = plot_images(images=imgs, targets=targets, paths=paths, fname=f)
                     if tb_writer and result is not None:
-                        tb_writer.add_image(
-                            f, result, dataformats='HWC', global_step=epoch)
+                        tb_writer.add_image(f, result, dataformats='HWC', global_step=epoch)
                         # tb_writer.add_graph(model, imgs)  # add model to tensorboard
 
             # end batch ------------------------------------------------------------------------------------------------
@@ -342,17 +339,18 @@ def train(hyp, opt, device, tb_writer=None):
                 ema.update_attr(
                     model, include=['yaml', 'nc', 'hyp', 'gr', 'names', 'stride'])
             final_epoch = epoch + 1 == epochs
-            if not opt.notest or final_epoch:  # Calculate mAP
+            # if not opt.notest or final_epoch:  # Calculate mAP
+            if False:
                 results, maps, times = test.test(opt.data,
-                                                 batch_size=batch_size,
-                                                 imgsz=imgsz_test,
-                                                 save_json=final_epoch and opt.data.endswith(
-                                                     os.sep + 'coco.yaml'),
-                                                 model=ema.ema.module if hasattr(
-                                                     ema.ema, 'module') else ema.ema,
-                                                 single_cls=opt.single_cls,
-                                                 dataloader=testloader,
-                                                 save_dir=log_dir)
+                                                batch_size=batch_size,
+                                                imgsz=imgsz_test,
+                                                save_json=final_epoch and opt.data.endswith(
+                                                    os.sep + 'coco.yaml'),
+                                                model=ema.ema.module if hasattr(
+                                                    ema.ema, 'module') else ema.ema,
+                                                single_cls=opt.single_cls,
+                                                dataloader=testloader,
+                                                save_dir=log_dir)
 
             # Write
             with open(results_file, 'a') as f:
@@ -360,11 +358,11 @@ def train(hyp, opt, device, tb_writer=None):
                 f.write(s + '%10.4g' * 7 % results + '\n')
             if len(opt.name) and opt.bucket:
                 os.system('gsutil cp %s gs://%s/results/results%s.txt' %
-                          (results_file, opt.bucket, opt.name))
+                        (results_file, opt.bucket, opt.name))
 
             # Tensorboard
             if tb_writer:
-                tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss',
+                tags = ['train/giou_loss', 'train/obj_loss', 'train/cls_loss', 'train/kpt_loss', 
                         'metrics/precision', 'metrics/recall', 'metrics/mAP_0.5', 'metrics/mAP_0.5:0.95',
                         'val/giou_loss', 'val/obj_loss', 'val/cls_loss']
                 for x, tag in zip(list(mloss[:-1]) + list(results), tags):
@@ -400,21 +398,17 @@ def train(hyp, opt, device, tb_writer=None):
     if rank in [-1, 0]:
         # Strip optimizers
         n = ('_' if len(opt.name) and not opt.name.isnumeric() else '') + opt.name
-        fresults, flast, fbest = 'results%s.txt' % n, wdir + \
-            'last%s.pt' % n, wdir + 'best%s.pt' % n
+        fresults, flast, fbest = 'results%s.txt' % n, wdir + 'last%s.pt' % n, wdir + 'best%s.pt' % n
         for f1, f2 in zip([wdir + 'last.pt', wdir + 'best.pt', 'results.txt'], [flast, fbest, fresults]):
             if os.path.exists(f1):
                 os.rename(f1, f2)  # rename
                 ispt = f2.endswith('.pt')  # is *.pt
-                strip_optimizer(f2, f2.replace('.pt', '_strip.pt')
-                                ) if ispt else None  # strip optimizer
-                os.system('gsutil cp %s gs://%s/weights' % (f2, opt.bucket)
-                          ) if opt.bucket and ispt else None  # upload
+                strip_optimizer(f2, f2.replace('.pt', '_strip.pt')) if ispt else None  # strip optimizer
+                os.system('gsutil cp %s gs://%s/weights' % (f2, opt.bucket)) if opt.bucket and ispt else None  # upload
         # Finish
         if not opt.evolve:
             plot_results(save_dir=log_dir)  # save as results.png
-        print('%g epochs completed in %.3f hours.\n' %
-              (epoch - start_epoch + 1, (time.time() - t0) / 3600))
+        print('%g epochs completed in %.3f hours.\n' % (epoch - start_epoch + 1, (time.time() - t0) / 3600))
 
     dist.destroy_process_group() if rank not in [-1, 0] else None
     torch.cuda.empty_cache()
@@ -431,8 +425,8 @@ if __name__ == '__main__':
                         default='./data/holo.yaml', help='data.yaml path')
     parser.add_argument('--hyp', type=str, default='./data/hyp.holo.yaml',
                         help='hyperparameters path, i.e. data/hyp.scratch.yaml')
-    parser.add_argument('--epochs', type=int, default=300)
-    parser.add_argument('--batch-size', type=int, default=2,
+    parser.add_argument('--epochs', type=int, default=3000)
+    parser.add_argument('--batch-size', type=int, default=1,
                         help='total batch size for all GPUs')
     parser.add_argument('--img-size', nargs='+', type=int,
                         default=[512, 512], help='train,test sizes')
@@ -440,9 +434,9 @@ if __name__ == '__main__':
                         help='rectangular training')
     parser.add_argument('--resume', nargs='?', const='get_last', default=False,
                         help='resume from given path/last.pt, or most recent run if blank')
-    parser.add_argument('--nosave', action='store_true',
+    parser.add_argument('--nosave', action='store_false',
                         help='only save final checkpoint')
-    parser.add_argument('--notest', action='store_true',
+    parser.add_argument('--notest', action='store_false',
                         help='only test final epoch')
     parser.add_argument('--noautoanchor', action='store_true',
                         help='disable autoanchor check')
